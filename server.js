@@ -23,14 +23,59 @@ app.use(cors({
 app.use(express.json());
 
 // ----------------------------------------------------------------------------
-// MongoDB Connection
+// MongoDB Connection (serverless-safe)
 // ----------------------------------------------------------------------------
-mongoose.connect(MONGO_URI, {
-  family: 4,               // force IPv4 - fixes SRV DNS timeouts on Vercel serverless
-  serverSelectionTimeoutMS: 20000
-})
-  .then(() => console.log('✅ MongoDB connected successfully to PIB_HALL database'))
-  .catch((err) => console.error('❌ MongoDB connection error:', err.message));
+// On Vercel every request can hit a fresh serverless invocation. The old code
+// fired mongoose.connect() once at module load and never waited for it, so a
+// request could reach a route handler before the connection was ready — the
+// query would then silently "buffer" and fail after Mongoose's default 10s
+// buffering timeout (exactly the "users.findOne() buffering timed out" error
+// seen in the logs). This pattern instead:
+//   1. Caches the connection (and in-flight connect promise) on `global`, so
+//      warm invocations reuse the same connection instead of reconnecting.
+//   2. Makes every request explicitly await a real, ready connection via
+//      middleware below, so failures show up as a clear 503 instead of a
+//      vague timeout.
+let cached = global._mongooseConn;
+if (!cached) {
+  cached = global._mongooseConn = { conn: null, promise: null };
+}
+
+async function connectToDatabase() {
+  if (cached.conn && mongoose.connection.readyState === 1) {
+    return cached.conn;
+  }
+  if (!cached.promise) {
+    cached.promise = mongoose
+      .connect(MONGO_URI, {
+        family: 4,                     // force IPv4 - fixes SRV DNS timeouts on Vercel serverless
+        serverSelectionTimeoutMS: 20000,
+        socketTimeoutMS: 45000
+      })
+      .then((m) => {
+        console.log('✅ MongoDB connected successfully to PIB_HALL database');
+        return m;
+      })
+      .catch((err) => {
+        console.error('❌ MongoDB connection error:', err.message);
+        cached.promise = null; // allow the next request to retry instead of staying stuck
+        throw err;
+      });
+  }
+  cached.conn = await cached.promise;
+  return cached.conn;
+}
+
+// Every request waits here for a real, ready connection before reaching any
+// route below — this is what actually prevents the buffering-timeout error.
+app.use(async (req, res, next) => {
+  try {
+    await connectToDatabase();
+    next();
+  } catch (err) {
+    return res.status(503).json({ success: false, message: 'Database connection failed. Please try again shortly.' });
+  }
+});
 
 // ----------------------------------------------------------------------------
 // Mongoose Schemas & Models

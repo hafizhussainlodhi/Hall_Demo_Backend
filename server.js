@@ -16,7 +16,7 @@ const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://admin:admin@cluster0.u
 // Middleware
 // ----------------------------------------------------------------------------
 app.use(cors({
-  origin: ['http://localhost:5173'],
+  origin: ['http://localhost:5173', 'https://hall-demo-beryl.vercel.app'],
   methods: ['GET', 'POST', 'PUT', 'DELETE'],
   credentials: true
 }));
